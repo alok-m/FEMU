@@ -16,13 +16,40 @@ static inline bool should_gc_high(struct ssd *ssd)
 
 static inline struct ppa get_maptbl_ent(struct ssd *ssd, uint64_t lpn)
 {
-    return ssd->maptbl[lpn];
+    switch(FTL_MAPPING_TBL_MODE){
+
+        case FTL_MAPPING_PAGE:
+        case FTL_MAPPING_BLOCK:
+        
+            return ssd->maptbl[lpn];
+            break;
+        
+        case FTL_MAPPING_HYBRID:
+            break;
+
+        default:
+            ftl_err(); //TODO
+    }
 }
 
 static inline void set_maptbl_ent(struct ssd *ssd, uint64_t lpn, struct ppa *ppa)
 {
-    ftl_assert(lpn < ssd->sp.tt_pgs);
-    ssd->maptbl[lpn] = *ppa;
+    switch(FTL_MAPPING_TBL_MODE){
+
+        case FTL_MAPPING_PAGE:
+            ftl_assert(lpn < ssd->sp.tt_pgs);
+            ssd->maptbl[lpn] = *ppa;
+            break;
+        
+        case FTL_MAPPING_BLOCK:
+            break;
+        
+        case FTL_MAPPING_HYBRID:
+            break;
+
+        default:
+            ftl_err(); //TODO
+    }
 }
 
 static uint64_t ppa2pgidx(struct ssd *ssd, struct ppa *ppa)
@@ -344,8 +371,13 @@ static void ssd_init_maptbl(struct ssd *ssd)
 {
     struct ssdparams *spp = &ssd->sp;
 
-    ssd->maptbl = g_malloc0(sizeof(struct ppa) * spp->tt_pgs);
-    for (int i = 0; i < spp->tt_pgs; i++) {
+    int tbl_size = spp->tt_pgs;
+    // if(FTL_MAPPING_TBL_MODE == FTL_MAPPING_BLOCK)
+    //     tbl_size = spp->tt_blks;
+
+    ssd->maptbl = g_malloc0(sizeof(struct ppa) * tbl_size);
+
+    for (int i = 0; i < tbl_size; i++) {
         ssd->maptbl[i].ppa = UNMAPPED_PPA;
     }
 }
@@ -769,12 +801,16 @@ static int do_gc(struct ssd *ssd, bool force)
 
 static uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
 {
-    struct ssdparams *spp = &ssd->sp;
+    // read request parameters
     uint64_t lba = req->slba;
     int nsecs = req->nlb;
-    struct ppa ppa;
+    
+    // ssd parameters
+    struct ssdparams *spp = &ssd->sp;
     uint64_t start_lpn = lba / spp->secs_per_pg;
     uint64_t end_lpn = (lba + nsecs - 1) / spp->secs_per_pg;
+    
+    struct ppa ppa;
     uint64_t lpn;
     uint64_t sublat, maxlat = 0;
 

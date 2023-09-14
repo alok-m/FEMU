@@ -8,6 +8,14 @@
 #define UNMAPPED_PPA    (~(0ULL))
 
 enum {
+    FTL_MAPPING_PAGE =  0,
+    FTL_MAPPING_BLOCK = 1,
+    FTL_MAPPING_HYBRID = 2
+};
+
+#define FTL_MAPPING_TBL_MODE FTL_MAPPING_PAGE
+
+enum {
     NAND_READ =  0,
     NAND_WRITE = 1,
     NAND_ERASE = 2,
@@ -198,8 +206,9 @@ struct ssd {
     char *ssdname;
     struct ssdparams sp;
     struct ssd_channel *ch;
-    struct ppa *maptbl; /* page level mapping table */
+    struct ppa *maptbl; /* page or block level mapping table - FTL_MAPPING_TBL_MODE*/
     uint64_t *rmap;     /* reverse mapptbl, assume it's stored in OOB */
+
     struct write_pointer wp;
     struct line_mgmt lm;
 
