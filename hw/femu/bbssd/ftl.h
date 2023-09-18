@@ -77,6 +77,12 @@ struct ppa {
     };
 };
 
+struct pba {        
+    struct ppa first_ppa;
+    uint64_t ppa_mapped;
+    // uint64_t ppa_free;
+};
+
 typedef int nand_sec_status_t;
 
 struct nand_page {
@@ -162,6 +168,8 @@ struct ssdparams {
     int tt_pls;       /* total # of planes in the SSD */
 
     int tt_luns;      /* total # of LUNs in the SSD */
+    
+    int pg_mask;      /* bit mask to extract page offset for block level mapping */
 };
 
 typedef struct line {

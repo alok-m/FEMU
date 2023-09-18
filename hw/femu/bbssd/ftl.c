@@ -19,11 +19,20 @@ static inline struct ppa get_maptbl_ent(struct ssd *ssd, uint64_t lpn)
     switch(FTL_MAPPING_TBL_MODE){
 
         case FTL_MAPPING_PAGE:
-        case FTL_MAPPING_BLOCK:
         
             return ssd->maptbl[lpn];
-            break;
         
+        case FTL_MAPPING_BLOCK:
+            
+            int offset = lpn & ssd->pg_mask;
+            int chunk = lpn >> ssd->pg_mask;
+            struct pba pba = ssd->maptbl[chunk];
+            struct ppa ppa = pba.first_ppa;
+            ppa.g.pg += offset; // offset from first ppa of block
+            ppa.ppa = ( (pba.ppa_mapped >> offset) & 1 ) ? 0 : UNMAPPED_PPA;
+
+            return ppa;
+
         case FTL_MAPPING_HYBRID:
             break;
 
@@ -32,16 +41,21 @@ static inline struct ppa get_maptbl_ent(struct ssd *ssd, uint64_t lpn)
     }
 }
 
-static inline void set_maptbl_ent(struct ssd *ssd, uint64_t lpn, struct ppa *ppa)
+static inline void set_maptbl_ent(struct ssd *ssd, uint64_t lpn, void *map_val)
 {
     switch(FTL_MAPPING_TBL_MODE){
 
         case FTL_MAPPING_PAGE:
+            ppa = (struct ppa *) map_val;
             ftl_assert(lpn < ssd->sp.tt_pgs);
             ssd->maptbl[lpn] = *ppa;
             break;
         
         case FTL_MAPPING_BLOCK:
+
+            pba = (struct pba *) map_val;
+            ssd->maptbl[lpn] = *pba;
+
             break;
         
         case FTL_MAPPING_HYBRID:
@@ -66,6 +80,20 @@ static uint64_t ppa2pgidx(struct ssd *ssd, struct ppa *ppa)
     ftl_assert(pgidx < spp->tt_pgs);
 
     return pgidx;
+}
+
+static void copy_blk(struct ssd *ssd, uint64_t lpn)
+{
+    int offset = lpn & ssd->pg_mask;
+    int chunk = lpn >> ssd->pg_mask;
+    struct pba pba = ssd->maptbl[chunk];
+
+    for(int i = 0; i<ssd->pgs_per_blk; i++){
+        pba.first_ppa
+    }
+    struct ppa ppa = pba.first_ppa;
+    ppa.g.pg += offset; // offset from first ppa of block
+    ppa.ppa = ( (pba.ppa_mapped >> offset) & 1 ) ? 0 : UNMAPPED_PPA;
 }
 
 static inline uint64_t get_rmap_ent(struct ssd *ssd, struct ppa *ppa)
@@ -250,6 +278,36 @@ static struct ppa get_new_page(struct ssd *ssd)
     return ppa;
 }
 
+static void ssd_advance_write_pointer_block(struct ssd *ssd)
+{
+    struct write_pointer *wpp = &ssd->wp;
+    while(wpp->pg != 0){
+        ssd_advance_write_pointer(ssd);
+    }
+}
+
+static struct pba get_new_block(struct ssd *ssd){
+
+    struct write_pointer *wpp = &ssd->wp;
+
+    struct ppa ppa;
+    ppa.ppa = 0;
+    ppa.g.ch = wpp->ch;
+    ppa.g.lun = wpp->lun;
+    ppa.g.pg = wpp->pg;
+    ppa.g.blk = wpp->blk;
+    ppa.g.pl = wpp->pl;
+    ftl_assert(ppa.g.pl == 0);
+
+    struct pba pba;
+    pba.first_ppa = ppa;
+    pba.ppa_mapped = 0;
+    ftl_assert(ppa.g.pg == 0);
+
+    return pba;
+
+}
+
 static void check_params(struct ssdparams *spp)
 {
     /*
@@ -309,6 +367,12 @@ static void ssd_init_params(struct ssdparams *spp, FemuCtrl *n)
     spp->gc_thres_lines_high = (int)((1 - spp->gc_thres_pcent_high) * spp->tt_lines);
     spp->enable_gc_delay = true;
 
+    int bits_req = 0;
+    int pgs_per_blk = spp->pgs_per_blk;
+    while(pgs_per_blk>>=1) bits_req++;
+    
+    spp->pg_mask = (1ULL << bits_req) - 1;
+    ftl_assert(spp->pg_mask > 0);
 
     check_params(spp);
 }
@@ -371,15 +435,32 @@ static void ssd_init_maptbl(struct ssd *ssd)
 {
     struct ssdparams *spp = &ssd->sp;
 
-    int tbl_size = spp->tt_pgs;
-    // if(FTL_MAPPING_TBL_MODE == FTL_MAPPING_BLOCK)
-    //     tbl_size = spp->tt_blks;
+    switch(FTL_MAPPING_TBL_MODE){
 
-    ssd->maptbl = g_malloc0(sizeof(struct ppa) * tbl_size);
+        case FTL_MAPPING_PAGE:
+            ssd->maptbl = g_malloc0(sizeof(struct ppa) * spp->tt_pgs);
+            for (int i = 0; i < spp->tt_pgs; i++) {
+                ssd->maptbl[i].ppa = UNMAPPED_PPA;
+            }
+            break;
+        
+        case FTL_MAPPING_BLOCK:
+            ssd->maptbl = g_malloc0(sizeof(struct pba) * spp->tt_blks);
+            for (int i = 0; i < spp->tt_blks; i++) {
+                ssd->maptbl[i].first_ppa.ppa = UNMAPPED_PPA;
+                ssd->maptbl[i].first_ppa.pg = 0;
+                // ssd->maptbl[i].ppa_free = (~(0ULL)); // all pages free - writes can happen
+                ssd->maptbl[i].ppa_mapped = (0ULL); // all pages not valid - reads cannot happen
+            }
+            break;
+        
+        case FTL_MAPPING_HYBRID:
+            break;
 
-    for (int i = 0; i < tbl_size; i++) {
-        ssd->maptbl[i].ppa = UNMAPPED_PPA;
+        default:
+            ftl_err(); //TODO
     }
+    
 }
 
 static void ssd_init_rmap(struct ssd *ssd)
@@ -822,9 +903,9 @@ static uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
     for (lpn = start_lpn; lpn <= end_lpn; lpn++) {
         ppa = get_maptbl_ent(ssd, lpn);
         if (!mapped_ppa(&ppa) || !valid_ppa(ssd, &ppa)) {
-            //printf("%s,lpn(%" PRId64 ") not mapped to valid ppa\n", ssd->ssdname, lpn);
-            //printf("Invalid ppa,ch:%d,lun:%d,blk:%d,pl:%d,pg:%d,sec:%d\n",
-            //ppa.g.ch, ppa.g.lun, ppa.g.blk, ppa.g.pl, ppa.g.pg, ppa.g.sec);
+            printf("%s,lpn(%" PRId64 ") not mapped to valid ppa\n", ssd->ssdname, lpn);
+            printf("Invalid ppa,ch:%d,lun:%d,blk:%d,pl:%d,pg:%d,sec:%d\n",
+            ppa.g.ch, ppa.g.lun, ppa.g.blk, ppa.g.pl, ppa.g.pg, ppa.g.sec);
             continue;
         }
 
@@ -863,24 +944,94 @@ static uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
     }
 
     for (lpn = start_lpn; lpn <= end_lpn; lpn++) {
-        ppa = get_maptbl_ent(ssd, lpn);
-        if (mapped_ppa(&ppa)) {
-            /* update old page information first */
-            mark_page_invalid(ssd, &ppa);
-            set_rmap_ent(ssd, INVALID_LPN, &ppa);
+
+        switch(FTL_MAPPING_TBL_MODE){
+
+            case FTL_MAPPING_PAGE:
+                ppa = get_maptbl_ent(ssd, lpn);
+                if (mapped_ppa(&ppa)) {
+                    /* update old page information first */
+                    mark_page_invalid(ssd, &ppa);
+                    set_rmap_ent(ssd, INVALID_LPN, &ppa);
+                }
+
+                /* new write */
+                ppa = get_new_page(ssd);
+                /* update maptbl */
+                set_maptbl_ent(ssd, lpn, &ppa);
+                /* update rmap */
+                set_rmap_ent(ssd, lpn, &ppa);
+
+                mark_page_valid(ssd, &ppa);
+                
+                /* need to advance the write pointer here */
+                ssd_advance_write_pointer(ssd);
+                
+                break;
+            
+            case FTL_MAPPING_BLOCK:
+
+                ppa = get_maptbl_ent(ssd, lpn);
+                struct pba pba;
+                
+                if(!mapped_ppa(&ppa)){
+
+                    if (0){ // unmapped - completely new write
+                        ssd_advance_write_pointer_block(ssd);
+                        struct lba lba = get_new_block(ssd);
+
+                        lba.ppa_mapped |= ( 1<<ppa.g.pg);
+                        set_maptbl_ent(ssd, lpn, &lba);
+
+                        set_rmap_ent(ssd, lpn, &ppa);
+
+                        mark_page_valid(ssd, &ppa);
+
+                    } else {
+                        // unmapped - new page write to an old block
+                    }
+
+                } else {
+
+                    // move existing block to a new block
+                    ssd_advance_write_pointer_block(ssd);
+                    struct lba lba = get_new_block(ssd);
+                    
+                    // for each page in old blk
+                    lba.first_ppa = OLD_BLK.ppa;
+                    lba.ppa_mapped = OLD_BLK.ppa_mapped;
+
+                    int old_first_ppa = OLD_BLK.first_ppa
+                    for(int pg=0; pg<ssd->pgs_per_blk; pg++){
+                        
+                        // 1. for old pages
+                            mark_page_invalid(ssd, &ppa);
+                            set_rmap_ent(ssd, INVALID_LPN, &ppa);
+                        
+                        // 2. for new corresponding page
+                            set_maptbl_ent(ssd, lpn, &lba);
+                            set_rmap_ent(ssd, lpn, &ppa);
+                            mark_page_valid(ssd, &ppa);
+                    }
+
+                    // write new page "ppa"
+                    // set_maptbl_ent(ssd, lpn, &lba);
+                    // set_rmap_ent(ssd, lpn, &ppa);
+                    // mark_page_valid(ssd, &ppa);
+
+                    // advanced write pointer block() ??
+
+   
+                }
+                
+                break;
+            
+            case FTL_MAPPING_HYBRID:
+                break;
+
+            default:
+                ftl_err(); //TODO
         }
-
-        /* new write */
-        ppa = get_new_page(ssd);
-        /* update maptbl */
-        set_maptbl_ent(ssd, lpn, &ppa);
-        /* update rmap */
-        set_rmap_ent(ssd, lpn, &ppa);
-
-        mark_page_valid(ssd, &ppa);
-
-        /* need to advance the write pointer here */
-        ssd_advance_write_pointer(ssd);
 
         struct nand_cmd swr;
         swr.type = USER_IO;
