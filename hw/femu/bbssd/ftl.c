@@ -20,13 +20,13 @@ static inline struct ppa get_maptbl_ent(struct ssd *ssd, uint64_t lpn)
 
         case FTL_MAPPING_PAGE:
         
-            return ssd->maptbl[lpn];
+            return ssd->pg_maptbl[lpn];
         
         case FTL_MAPPING_BLOCK:
             
-            int offset = lpn & ssd->pg_mask;
-            int chunk = lpn >> ssd->pg_mask;
-            struct pba pba = ssd->maptbl[chunk];
+            int offset = lpn & ssd->sp.pg_mask;
+            int chunk = lpn >> ssd->sp.pg_mask;
+            struct pba pba = ssd->blk_maptbl[chunk];
             struct ppa ppa = pba.first_ppa;
             ppa.g.pg += offset; // offset from first ppa of block
             ppa.ppa = ( (pba.ppa_mapped >> offset) & 1 ) ? 0 : UNMAPPED_PPA;
@@ -46,15 +46,15 @@ static inline void set_maptbl_ent(struct ssd *ssd, uint64_t lpn, void *map_val)
     switch(FTL_MAPPING_TBL_MODE){
 
         case FTL_MAPPING_PAGE:
-            ppa = (struct ppa *) map_val;
+            struct ppa *ppa = (struct ppa *) map_val;
             ftl_assert(lpn < ssd->sp.tt_pgs);
-            ssd->maptbl[lpn] = *ppa;
+            ssd->pg_maptbl[lpn] = *ppa;
             break;
         
         case FTL_MAPPING_BLOCK:
 
-            pba = (struct pba *) map_val;
-            ssd->maptbl[lpn] = *pba;
+            struct pba *pba = (struct pba *) map_val;
+            ssd->blk_maptbl[lpn] = *pba;
 
             break;
         
@@ -82,19 +82,19 @@ static uint64_t ppa2pgidx(struct ssd *ssd, struct ppa *ppa)
     return pgidx;
 }
 
-static void copy_blk(struct ssd *ssd, uint64_t lpn)
-{
-    int offset = lpn & ssd->pg_mask;
-    int chunk = lpn >> ssd->pg_mask;
-    struct pba pba = ssd->maptbl[chunk];
+// static void copy_blk(struct ssd *ssd, uint64_t lpn)
+// {
+//     int offset = lpn & ssd->sp.pg_mask;
+//     int chunk = lpn >> ssd->sp.pg_mask;
+//     struct pba pba = ssd->maptbl[chunk];
 
-    for(int i = 0; i<ssd->pgs_per_blk; i++){
-        pba.first_ppa
-    }
-    struct ppa ppa = pba.first_ppa;
-    ppa.g.pg += offset; // offset from first ppa of block
-    ppa.ppa = ( (pba.ppa_mapped >> offset) & 1 ) ? 0 : UNMAPPED_PPA;
-}
+//     for(int i = 0; i<ssd->pgs_per_blk; i++){
+//         pba.first_ppa
+//     }
+//     struct ppa ppa = pba.first_ppa;
+//     ppa.g.pg += offset; // offset from first ppa of block
+//     ppa.ppa = ( (pba.ppa_mapped >> offset) & 1 ) ? 0 : UNMAPPED_PPA;
+// }
 
 static inline uint64_t get_rmap_ent(struct ssd *ssd, struct ppa *ppa)
 {
@@ -438,19 +438,19 @@ static void ssd_init_maptbl(struct ssd *ssd)
     switch(FTL_MAPPING_TBL_MODE){
 
         case FTL_MAPPING_PAGE:
-            ssd->maptbl = g_malloc0(sizeof(struct ppa) * spp->tt_pgs);
+            ssd->pg_maptbl = g_malloc0(sizeof(struct ppa) * spp->tt_pgs);
             for (int i = 0; i < spp->tt_pgs; i++) {
-                ssd->maptbl[i].ppa = UNMAPPED_PPA;
+                ssd->pg_maptbl[i].ppa = UNMAPPED_PPA;
             }
             break;
         
         case FTL_MAPPING_BLOCK:
-            ssd->maptbl = g_malloc0(sizeof(struct pba) * spp->tt_blks);
+            ssd->blk_maptbl = g_malloc0(sizeof(struct pba) * spp->tt_blks);
             for (int i = 0; i < spp->tt_blks; i++) {
-                ssd->maptbl[i].first_ppa.ppa = UNMAPPED_PPA;
-                ssd->maptbl[i].first_ppa.pg = 0;
-                // ssd->maptbl[i].ppa_free = (~(0ULL)); // all pages free - writes can happen
-                ssd->maptbl[i].ppa_mapped = (0ULL); // all pages not valid - reads cannot happen
+                ssd->blk_maptbl[i].first_ppa.ppa = UNMAPPED_PPA;
+                ssd->blk_maptbl[i].first_ppa.pg = 0;
+                // ssd->blk_maptbl[i].ppa_free = (~(0ULL)); // all pages free - writes can happen
+                ssd->blk_maptbl[i].ppa_mapped = (0ULL); // all pages not valid - reads cannot happen
             }
             break;
         

@@ -214,7 +214,8 @@ struct ssd {
     char *ssdname;
     struct ssdparams sp;
     struct ssd_channel *ch;
-    struct ppa *maptbl; /* page or block level mapping table - FTL_MAPPING_TBL_MODE*/
+    struct ppa *pg_maptbl; /* page or block level mapping table - FTL_MAPPING_TBL_MODE*/
+    struct pba *blk_maptbl; /* page or block level mapping table - FTL_MAPPING_TBL_MODE*/
     uint64_t *rmap;     /* reverse mapptbl, assume it's stored in OOB */
 
     struct write_pointer wp;
