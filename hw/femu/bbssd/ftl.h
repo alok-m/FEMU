@@ -13,7 +13,7 @@ enum {
     FTL_MAPPING_HYBRID = 2
 };
 
-#define FTL_MAPPING_TBL_MODE FTL_MAPPING_PAGE
+#define FTL_MAPPING_TBL_MODE FTL_MAPPING_BLOCK
 
 enum {
     NAND_READ =  0,
@@ -77,10 +77,9 @@ struct ppa {
     };
 };
 
-struct pba {        
+struct pba {
     struct ppa first_ppa;
     uint64_t ppa_mapped;
-    // uint64_t ppa_free;
 };
 
 typedef int nand_sec_status_t;
