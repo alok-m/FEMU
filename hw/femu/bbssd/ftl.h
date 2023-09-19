@@ -77,7 +77,7 @@ struct ppa {
 
 struct pba {
     struct ppa first_ppa;
-    uint64_t ppa_mapped;
+    uint64_t *ppa_mapped;
 };
 
 typedef int nand_sec_status_t;

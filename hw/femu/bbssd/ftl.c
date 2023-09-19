@@ -249,7 +249,8 @@ static void ssd_advance_write_pointer_block(struct ssd *ssd)
     }
 }
 
-static struct pba get_new_block(struct ssd *ssd){
+static struct pba get_new_block(struct ssd *ssd)
+{
 
     struct write_pointer *wpp = &ssd->wp;
 
@@ -264,11 +265,27 @@ static struct pba get_new_block(struct ssd *ssd){
 
     struct pba pba;
     pba.first_ppa = ppa;
-    pba.ppa_mapped = 0;
+    pba.ppa_mapped = g_malloc0(sizeof(uint64_t) * (((ssd->sp.pgs_per_blk-1) / 64) + 1));;
     ftl_assert(ppa.g.pg == 0);
 
     return pba;
 
+}
+
+static bool get_pba_mapped(struct pba *pba, int pg_offset)
+{
+    uint64_t *ppa_mapped = pba->ppa_mapped;
+    int idx = pg_offset / 64;
+    int offset = pg_offset % 64;
+    return (ppa_mapped[idx] >> offset) & 1;
+}
+
+static void set_pba_mapped(struct pba *pba, int pg_offset)
+{
+    uint64_t *ppa_mapped = pba->ppa_mapped;
+    int idx = pg_offset / 64;
+    int offset = pg_offset % 64;
+    ppa_mapped[idx] |= ( (1ULL)<<offset);
 }
 #endif
 
@@ -412,7 +429,7 @@ static void ssd_init_maptbl(struct ssd *ssd)
             ssd->blk_maptbl = g_malloc0(sizeof(struct pba) * spp->tt_blks);
             for (int i = 0; i < spp->tt_blks; i++) {
                 ssd->blk_maptbl[i].first_ppa.ppa = UNMAPPED_PPA;
-                ssd->blk_maptbl[i].ppa_mapped = 0;
+                ssd->blk_maptbl[i].ppa_mapped = g_malloc0(sizeof(uint64_t) * (((spp->pgs_per_blk-1) / 64) + 1));;
             }
             break;
         
@@ -871,7 +888,7 @@ static uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
         struct pba pba = get_maptbl_ent(ssd, lpn);
         ppa = pba.first_ppa;
         int offset = lpn & ssd->sp.pg_mask;
-        if(!((pba.ppa_mapped >> offset) & 1)){
+        if(!get_pba_mapped(&pba, offset)){
             // printf("%s,lpn(%" PRId64 ") not mapped to valid ppa\n", ssd->ssdname, lpn);
             // printf("Invalid ppa,ch:%d,lun:%d,blk:%d,pl:%d,pg:%d,sec:%d\n",
             // ppa.g.ch, ppa.g.lun, ppa.g.blk, ppa.g.pl, ppa.g.pg, ppa.g.sec);
@@ -962,7 +979,7 @@ static uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
                 ssd_advance_write_pointer_block(ssd);
                 pba = get_new_block(ssd);
                 int offset = lpn & ssd->sp.pg_mask;
-                pba.ppa_mapped |= ( (1ULL)<<offset);
+                set_pba_mapped(&pba, offset)
                 set_maptbl_ent(ssd, lpn, &pba);
 
                 struct ppa ppa = pba.first_ppa;
@@ -985,11 +1002,11 @@ static uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
             {
                 int offset = lpn & ssd->sp.pg_mask;
                 
-                if( !((pba.ppa_mapped >> offset) & (1ULL)) ){
+                if( !get_pba_mapped(&pba, offset) ){
                     printf("ALOK write: 5b\n");
                     
                     // new page write, existing block 
-                    pba.ppa_mapped |= ( (1ULL)<<offset);
+                    set_pba_mapped(&pba, offset);
                     set_maptbl_ent(ssd, lpn, &pba);
 
                     struct ppa ppa = pba.first_ppa;
