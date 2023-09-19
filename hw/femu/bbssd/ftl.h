@@ -7,11 +7,9 @@
 #define INVALID_LPN     (~(0ULL))
 #define UNMAPPED_PPA    (~(0ULL))
 
-enum {
-    FTL_MAPPING_PAGE =  0,
-    FTL_MAPPING_BLOCK = 1,
-    FTL_MAPPING_HYBRID = 2
-};
+#define FTL_MAPPING_PAGE 0
+#define FTL_MAPPING_BLOCK 1
+#define FTL_MAPPING_HYBRID 2
 
 #define FTL_MAPPING_TBL_MODE FTL_MAPPING_BLOCK
 
@@ -168,7 +166,7 @@ struct ssdparams {
 
     int tt_luns;      /* total # of LUNs in the SSD */
     
-    int pg_mask;      /* bit mask to extract page offset for block level mapping */
+    uint64_t pg_mask;      /* bit mask to extract page offset for block level mapping */
 };
 
 typedef struct line {
