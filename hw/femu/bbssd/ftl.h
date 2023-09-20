@@ -167,6 +167,7 @@ struct ssdparams {
     int tt_luns;      /* total # of LUNs in the SSD */
     
     uint64_t pg_mask;      /* bit mask to extract page offset for block level mapping */
+    uint64_t pg_bits;      /* bits required to store pgs_per_blk */
 };
 
 typedef struct line {
