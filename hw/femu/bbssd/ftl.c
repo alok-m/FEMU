@@ -19,6 +19,20 @@ static inline bool should_gc_high(struct ssd *ssd)
     {       
         return ssd->pg_maptbl[lpn];
     }
+#elif FTL_MAPPING_TBL_MODE == FTL_MAPPING_HYBRID
+    static inline struct ppa get_maptbl_ent(struct ssd *ssd, uint64_t lpn)
+    {
+        // check page table, if not found, check block mapping table
+        struct ppa ppa = ssd->pg_maptbl[lpn];
+
+        if(!mapped_ppa(&ppa)){
+            int chunk = lpn >> ssd->sp.pg_bits;
+            ppa = ssd->blk_maptbl[chunk];
+        }
+
+        return ppa;
+
+    }
 #else
     static inline struct pba get_maptbl_ent(struct ssd *ssd, uint64_t lpn)
     {
@@ -27,19 +41,91 @@ static inline bool should_gc_high(struct ssd *ssd)
         return ssd->blk_maptbl[chunk];
     }
 #endif
-    static inline void set_maptbl_ent(struct ssd *ssd, uint64_t lpn, void *map_val)
-    {       
 
-        #if FTL_MAPPING_TBL_MODE == FTL_MAPPING_PAGE
-            struct ppa *ppa = map_val;
-            ftl_assert(lpn < ssd->sp.tt_pgs);
-            ssd->pg_maptbl[lpn] = *ppa;
-        #else
-            struct pba *pba = map_val;
-            int chunk = lpn >> ssd->sp.pg_bits;
-            ssd->blk_maptbl[chunk] = *pba;
-        #endif
+static inline void set_maptbl_ent(struct ssd *ssd, uint64_t lpn, void *map_val)
+{       
+
+    #if FTL_MAPPING_TBL_MODE == FTL_MAPPING_PAGE || FTL_MAPPING_TBL_MODE == FTL_MAPPING_HYBRID
+        struct ppa *ppa = map_val;
+        ftl_assert(lpn < ssd->sp.tt_pgs);
+        ssd->pg_maptbl[lpn] = *ppa;
+    #else
+        struct pba *pba = map_val;
+        int chunk = lpn >> ssd->sp.pg_bits;
+        ssd->blk_maptbl[chunk] = *pba;
+    #endif
+}
+
+#if FTL_MAPPING_TBL_MODE == FTL_MAPPING_HYBRID
+
+    // static inline int merge_cmp_pri(pqueue_pri_t next, pqueue_pri_t curr)
+    // {
+    //     return (next > curr);
+    // }
+
+    // static inline pqueue_pri_t merge_get_pri(void *a)
+    // {
+    //     return (uint64_t)a;
+    // }
+
+    // static inline void merge_set_pri(void *a, pqueue_pri_t pri)
+    // {
+    //     ((struct line *)a)->vpc = pri;
+    // }
+
+typedef struct node { 
+    uint64_t lpn;
+    // int priority; 
+    struct node* next;
+}; 
+  
+struct node* newNode(uint64_t lpn) 
+{ 
+    struct node* temp = (struct node*)malloc(sizeof(struct node*)); 
+    temp->lpn = lpn; 
+    temp->next = NULL; 
+    return temp; 
+}
+
+uint64_t peek(struct node** head) 
+{ 
+    return (*head)->lpn; 
+} 
+  
+void pop(struct node** head) 
+{ 
+    Node* temp = *head; 
+    (*head) = (*head)->next; 
+    free(temp); 
+} 
+
+void push(sturct node** head, uint64_t lpn) 
+{
+    Node* temp = newNode(lpn);
+    Node* start = (*head); 
+    // if(!start){
+    //     (*head) = temp;
+    //     return;
+    // }
+    else if ((*head)->lpn < lpn) {
+        temp->next = *head;
+        (*head) = temp;
+        return;
     }
+
+    while (start->next != NULL && 
+        start->next->lpn > lpn) { 
+        start = start->next; 
+    }
+    temp->next = start->next; 
+    start->next = temp; 
+} 
+  
+bool isEmpty(Node** head) 
+{ 
+    return (*head) == NULL; 
+} 
+#endif
 
 static uint64_t ppa2pgidx(struct ssd *ssd, struct ppa *ppa)
 {
@@ -170,6 +256,8 @@ static struct line *get_next_free_line(struct ssd *ssd)
     return curline;
 }
 
+#if FTL_MAPPING_TBL_MODE == FTL_MAPPING_PAGE
+
 static void ssd_advance_write_pointer(struct ssd *ssd)
 {
     struct ssdparams *spp = &ssd->sp;
@@ -224,6 +312,60 @@ static void ssd_advance_write_pointer(struct ssd *ssd)
     }
 }
 
+#elif FTL_MAPPING_TBL_MODE == FTL_MAPPING_BLOCK
+
+static void ssd_advance_write_pointer(struct ssd *ssd)
+{
+    struct ssdparams *spp = &ssd->sp;
+    struct write_pointer *wpp = &ssd->wp;
+    struct line_mgmt *lm = &ssd->lm;
+
+    check_addr(wpp->ch, spp->nchs);
+    wpp->ch++;
+    if (wpp->ch == spp->nchs) {
+        wpp->ch = 0;
+        check_addr(wpp->lun, spp->luns_per_ch);
+        wpp->lun++;
+        /* in this case, we should go to next lun */
+        if (wpp->lun == spp->luns_per_ch) {
+            wpp->lun = 0;
+            /* go to next block */
+            wpp->pg = 0;
+            /* move current line to {victim,full} line list */
+            if (wpp->curline->vpc == spp->pgs_per_line) {
+                /* all pgs are still valid, move to full line list */
+                ftl_assert(wpp->curline->ipc == 0);
+                QTAILQ_INSERT_TAIL(&lm->full_line_list, wpp->curline, entry);
+                lm->full_line_cnt++;
+            } else {
+                ftl_assert(wpp->curline->vpc >= 0 && wpp->curline->vpc < spp->pgs_per_line);
+                /* there must be some invalid pages in this line */
+                ftl_assert(wpp->curline->ipc > 0);
+                pqueue_insert(lm->victim_line_pq, wpp->curline);
+                lm->victim_line_cnt++;
+            }
+            /* current line is used up, pick another empty line */
+            check_addr(wpp->blk, spp->blks_per_pl);
+            wpp->curline = NULL;
+            wpp->curline = get_next_free_line(ssd);
+            if (!wpp->curline) {
+                /* TODO */
+                abort();
+            }
+            wpp->blk = wpp->curline->id;
+            check_addr(wpp->blk, spp->blks_per_pl);
+            /* make sure we are starting from page 0 in the super block */
+            ftl_assert(wpp->pg == 0);
+            ftl_assert(wpp->lun == 0);
+            ftl_assert(wpp->ch == 0);
+            /* TODO: assume # of pl_per_lun is 1, fix later */
+            ftl_assert(wpp->pl == 0);
+        }
+    }
+}
+
+#endif
+
 static struct ppa get_new_page(struct ssd *ssd)
 {
     struct write_pointer *wpp = &ssd->wp;
@@ -239,52 +381,34 @@ static struct ppa get_new_page(struct ssd *ssd)
     return ppa;
 }
 
-#if FTL_MAPPING_TBL_MODE == FTL_MAPPING_BLOCK
-
-static void ssd_advance_write_pointer_block(struct ssd *ssd)
-{
-    struct write_pointer *wpp = &ssd->wp;
-    while(wpp->pg != 0){
-        ssd_advance_write_pointer(ssd);
-    }
-}
-
 static struct pba get_new_block(struct ssd *ssd)
 {
 
     struct write_pointer *wpp = &ssd->wp;
-
-    struct ppa ppa;
-    ppa.ppa = 0;
-    ppa.g.ch = wpp->ch;
-    ppa.g.lun = wpp->lun;
-    ppa.g.pg = wpp->pg;
-    ppa.g.blk = wpp->blk;
-    ppa.g.pl = wpp->pl;
-    ftl_assert(ppa.g.pl == 0);
+    struct ppa ppa = get_new_page(ssd);
 
     struct pba pba;
     pba.first_ppa = ppa;
     pba.ppa_mapped = g_malloc0(sizeof(uint64_t) * (((ssd->sp.pgs_per_blk-1) / 64) + 1));
-    ftl_assert(ppa.g.pg == 0);
 
     return pba;
-
 }
+
+#if FTL_MAPPING_TBL_MODE == FTL_MAPPING_BLOCK
 
 static bool get_pba_mapped(struct pba *pba, uint64_t pg_offset)
 {
     uint64_t *ppa_mapped = pba->ppa_mapped;
-    int idx = pg_offset / 64;
-    int offset = pg_offset % 64;
+    uint64_t idx = pg_offset / 64;
+    uint64_t offset = pg_offset % 64;
     return (ppa_mapped[idx] >> offset) & 1ULL;
 }
 
 static void set_pba_mapped(struct pba *pba, uint64_t pg_offset)
 {
     uint64_t *ppa_mapped = pba->ppa_mapped;
-    int idx = pg_offset / 64;
-    int offset = pg_offset % 64;
+    uint64_t idx = pg_offset / 64;
+    uint64_t offset = pg_offset % 64;
     ppa_mapped[idx] |= ( (1ULL)<<offset);
 }
 #endif
@@ -352,7 +476,7 @@ static void ssd_init_params(struct ssdparams *spp, FemuCtrl *n)
     int pgs_per_blk = spp->pgs_per_blk;
     while(pgs_per_blk>>=1ULL) pg_bits++;
     
-    spp->pg_mask = (1ULL << pg_bits) - 1;
+    spp->pg_mask = (1ULL << pg_bits) - 1ULL;
     spp->pg_bits = pg_bits;
     ftl_assert(spp->pg_mask > 0);
 
@@ -435,6 +559,22 @@ static void ssd_init_maptbl(struct ssd *ssd)
             break;
         
         case FTL_MAPPING_HYBRID:
+            uint64_t pg_tbl_size = (spp->tt_pgs * spp->log_ratio);
+            uint64_t blk_tbl_size = (spp->tt_pgs  - pg_tbl_size) / spp->pgs_per_blk;
+            
+            ssd->pg_maptbl = g_malloc0(sizeof(struct ppa) * pg_tbl_size);
+            for (int i = 0; i < pg_tbl_size; i++) {
+                ssd->pg_maptbl[i].ppa = UNMAPPED_PPA;
+            }
+            
+            ssd->blk_maptbl = g_malloc0(sizeof(struct pba) * blk_tbl_size);
+            for (int i = 0; i < spp->blk_tbl_size; i++) {
+                ssd->blk_maptbl[i].first_ppa.ppa = UNMAPPED_PPA;
+                ssd->blk_maptbl[i].ppa_mapped = g_malloc0(sizeof(uint64_t) * (((spp->pgs_per_blk-1) / 64) + 1));
+            }
+            ssd->merge_q = pqueue_init(pg_tbl_size, merge_cmp_pri,
+                            merge_get_pri, merge_set_pri,
+                            victim_line_get_pos, victim_line_set_pos);
             break;
 
         default:
@@ -862,6 +1002,59 @@ static int do_gc(struct ssd *ssd, bool force)
     return 0;
 }
 
+static bool do_merge(struct ssd *ssd)
+{
+
+    /*
+    - after each write to the log table, you also add the write to a priority queue - merge queue
+    - do_merge() triggered after each write - to ensure LPNs in the merge queue are always in the log table only
+        - shitty performance but provably correct
+    - merge queue implemented as priority queue using a linked list
+        - this should be in DRAM theoretically in a real SSD???
+    - steps ofr do_merge() - only does partial/full merges right now, no switch yet
+    for pg in merge_queue:
+        1a. iterate forward in the LL as you find more LPNs in the same physical block
+        1b. while iterating, if you find a missing LPN for this block, try to read it from block level (if not present, its empty)
+        2a. allocate a new block in the block table - you should have all pgs_per_blk pages ready now - some from merge queue, some read from block table
+        2b. invalidate the pages you read from the block table - these will go as part of your new block now
+        3. write this full new block and add to the block level table
+        4. remove LPNs from linked list and log table
+    */
+
+    while(!isEmpty(&ssd->merge_q)){ // or maybe till queue is larger than some size
+        uint64_t lpn = peek(&ssd->merge_q); pop(&ssd->merge_q);
+        struct pba pba = get_new_block(ssd);
+        int offset = lpn & ssd->sp.pg_mask;
+        int chunk = lpn >> ssd->sp.pg_bits;
+        struct ppa ppa = get log page table entry (lpn);
+        if(mapped_ppa(&ppa)){
+            mark_page_invalid(&ppa);
+            set_rmap_ent(ssd, INVALID_LPN, &ppa);
+        }
+        set_pba_mapped(&pba, offset);
+
+        while(!isEmpty(&ssd->merge_q) && (lpn = peek(&ssd->merge_q))){
+            pop(&ssd->merge_q);
+            int new_chunk = lpn >> ssd->sp.pg_bits;
+            int new_offset = lpn & ssd->sp.pg_mask;
+            if(new_chunk != chunk) break;
+            ppa = get log page table entry (lpn);
+            if(mapped_ppa(&ppa)){
+                mark_page_invalid(&ppa);
+                set_rmap_ent(ssd, INVALID_LPN, &ppa);
+            }
+            set_pba_mapped(&pba, new_offset);
+
+            // add the chunk to do the actual write latency
+        }
+        
+        // set block mapping table(&pba);
+    
+        // switch merge here
+    }
+
+}
+
 static uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
 {
     // read request parameters
@@ -883,18 +1076,18 @@ static uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
     /* normal IO read path */
     for (lpn = start_lpn; lpn <= end_lpn; lpn++) {
         struct ppa ppa;
-        #if FTL_MAPPING_TBL_MODE == FTL_MAPPING_PAGE
-        ppa = get_maptbl_ent(ssd, lpn);
+        #if FTL_MAPPING_TBL_MODE == FTL_MAPPING_PAGE || FTL_MAPPING_TBL_MODE == FTL_MAPPING_HYBRID
+            ppa = get_maptbl_ent(ssd, lpn);
         #else
-        struct pba pba = get_maptbl_ent(ssd, lpn);
-        ppa = pba.first_ppa;
-        int offset = lpn & ssd->sp.pg_mask;
-        if(!get_pba_mapped(&pba, offset)){
-            // printf("%s,lpn(%" PRId64 ") not mapped to valid ppa\n", ssd->ssdname, lpn);
-            // printf("Invalid ppa,ch:%d,lun:%d,blk:%d,pl:%d,pg:%d,sec:%d\n",
-            // ppa.g.ch, ppa.g.lun, ppa.g.blk, ppa.g.pl, ppa.g.pg, ppa.g.sec);
-            continue;
-        }
+            struct pba pba = get_maptbl_ent(ssd, lpn);
+            ppa = pba.first_ppa;
+            int offset = lpn & ssd->sp.pg_mask;
+            if(!get_pba_mapped(&pba, offset)){
+                // printf("%s,lpn(%" PRId64 ") not mapped to valid ppa\n", ssd->ssdname, lpn);
+                // printf("Invalid ppa,ch:%d,lun:%d,blk:%d,pl:%d,pg:%d,sec:%d\n",
+                // ppa.g.ch, ppa.g.lun, ppa.g.blk, ppa.g.pl, ppa.g.pg, ppa.g.sec);
+                continue;
+            }
         #endif
         if (!mapped_ppa(&ppa) || !valid_ppa(ssd, &ppa)) {
             // printf("%s,lpn(%" PRId64 ") not mapped to valid ppa\n", ssd->ssdname, lpn);
@@ -940,7 +1133,7 @@ static uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
 
         // printf("ALOK write: lpn : %lu\n", lpn);
 
-        #if FTL_MAPPING_TBL_MODE == FTL_MAPPING_PAGE
+        #if FTL_MAPPING_TBL_MODE == FTL_MAPPING_PAGE || FTL_MAPPING_TBL_MODE == FTL_MAPPING_HYBRID
             
             struct ppa ppa = get_maptbl_ent(ssd, lpn);
             if (mapped_ppa(&ppa)) {
@@ -971,101 +1164,65 @@ static uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
 
         #else
 
+            int offset = lpn & ssd->sp.pg_mask;
             struct pba pba = get_maptbl_ent(ssd, lpn);
 
             if(!mapped_ppa( &pba.first_ppa ))
             {
-                // printf("ALOK write: 5a\n");
-                // completely new write
-                ssd_advance_write_pointer_block(ssd);
-                pba = get_new_block(ssd);
-                int offset = lpn & ssd->sp.pg_mask;
-                set_pba_mapped(&pba, offset);
-                set_maptbl_ent(ssd, lpn, &pba);
-
-                struct ppa ppa = pba.first_ppa;
-                ppa.g.pg += offset; // offset from first ppa of block
-
-                set_rmap_ent(ssd, lpn, &ppa);
-
-                mark_page_valid(ssd, &ppa);
-
+                // CASE 1: completely new write
                 ssd_advance_write_pointer(ssd);
-                struct nand_cmd swr;
-                swr.type = USER_IO;
-                swr.cmd = NAND_WRITE;
-                swr.stime = req->stime;
-                /* get latency statistics */
-                curlat = ssd_advance_status(ssd, &ppa, &swr);
-                maxlat = (curlat > maxlat) ? curlat : maxlat;
+                pba = get_new_block(ssd);
             }
-            else
+            
+            if(get_pba_mapped(&pba, offset))
             {
-                int offset = lpn & ssd->sp.pg_mask;
+                // move existing block to a new block
+                ssd_advance_write_pointer(ssd);
+                struct pba new_pba = get_new_block(ssd);
+                new_pba.ppa_mapped = pba.ppa_mapped;
                 
-                if( !get_pba_mapped(&pba, offset) ){
-                    // printf("ALOK write: 5b\n");
+                struct ppa old_first_ppa = pba.first_ppa;
+                struct ppa new_first_ppa = new_pba.first_ppa;
+                
+                for(int pg=0; pg<ssd->sp.pgs_per_blk; pg++){
+
+                    struct ppa old_ppa_offset = old_first_ppa;
+                    old_ppa.g.pg = pg;
+                    struct ppa new_ppa_offset = new_first_ppa;
+                    new_ppa_offset.g.pg = pg;
                     
-                    // new page write, existing block 
-                    set_pba_mapped(&pba, offset);
-                    set_maptbl_ent(ssd, lpn, &pba);
+                    mark_page_invalid(ssd, &old_ppa_offset);
+                    set_rmap_ent(ssd, INVALID_LPN, &old_ppa_offset);
+                    
+                    // if new page write, or if there was no data to copy
+                    if(pg == offset || !get_pba_mapped(&pba, pg)) continue;
 
-                    struct ppa ppa = pba.first_ppa;
-                    ppa.g.pg += offset; // offset from first ppa of block
-                    set_rmap_ent(ssd, lpn, &ppa);
-                    mark_page_valid(ssd, &ppa);
+                    set_rmap_ent(ssd, lpn + pg, &new_ppa_offset);
+                    mark_page_valid(ssd, &new_ppa_offset);
 
-                    ssd_advance_write_pointer(ssd);
                     struct nand_cmd swr;
                     swr.type = USER_IO;
                     swr.cmd = NAND_WRITE;
                     swr.stime = req->stime;
-                    /* get latency statistics */
-                    curlat = ssd_advance_status(ssd, &ppa, &swr);
-                    maxlat = (curlat > maxlat) ? curlat : maxlat;
+                    curlat = ssd_advance_status(ssd, &new_ppa_offset, &swr);
                 }
-                else
-                {
-                    // move existing block to a new block
-                    ssd_advance_write_pointer_block(ssd);
-                    struct pba new_pba = get_new_block(ssd);
-                    new_pba.ppa_mapped = pba.ppa_mapped;
-                    
-                    struct ppa old_ppa = pba.first_ppa;
-                    struct ppa new_ppa = new_pba.first_ppa;
-                    
-                    // printf("ALOK write: 5c\n");
 
-                    // for each page in old blk
-                    for(int pg=0; pg<ssd->sp.pgs_per_blk; pg++){
+                pba = new_pba;
 
-                        struct ppa new_ppa_offset = new_ppa;
-                        new_ppa_offset.g.pg += pg;
-                        struct ppa old_ppa_offset = old_ppa;
-                        old_ppa.g.pg += pg;
-                        
-                        mark_page_invalid(ssd, &old_ppa_offset);
-                        set_rmap_ent(ssd, INVALID_LPN, &old_ppa_offset);
-                        
-                        set_rmap_ent(ssd, lpn + pg, &new_ppa_offset);
-                        mark_page_valid(ssd, &new_ppa_offset);
-
-                        ssd_advance_write_pointer(ssd);
-                    }
-
-                    // for new block
-                    set_maptbl_ent(ssd, lpn, &new_pba);
-
-                    // write new page "ppa"
-                    struct ppa new_entry = new_ppa;
-                    new_entry.g.pg += offset;
-                    set_rmap_ent(ssd, lpn, &new_entry);
-                    mark_page_valid(ssd, &new_entry);
-
-                }
             }
 
-            // printf("ALOK write: 6\n");
+            set_pba_mapped(&pba, offset);
+            set_maptbl_ent(ssd, lpn, &pba);
+            struct ppa ppa = pba.first_ppa;
+            ppa.g.pg += offset; // offset from first ppa of block
+            set_rmap_ent(ssd, lpn, &ppa);
+            mark_page_valid(ssd, &ppa);
+            struct nand_cmd swr;
+            swr.type = USER_IO;
+            swr.cmd = NAND_WRITE;
+            swr.stime = req->stime;
+            curlat = ssd_advance_status(ssd, &ppa, &swr);
+            maxlat = (curlat > maxlat) ? curlat : maxlat;
             
         #endif
     }

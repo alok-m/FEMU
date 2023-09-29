@@ -166,8 +166,10 @@ struct ssdparams {
 
     int tt_luns;      /* total # of LUNs in the SSD */
     
-    uint64_t pg_mask;      /* bit mask to extract page offset for block level mapping */
-    uint64_t pg_bits;      /* bits required to store pgs_per_blk */
+    uint64_t pg_mask; /* bit mask to extract page offset for block level mapping */
+    uint64_t pg_bits; /* bits required to store pgs_per_blk */
+
+    int log_ratio;    /* percentage of physical pages that are page mapped */
 };
 
 typedef struct line {
@@ -212,8 +214,9 @@ struct ssd {
     char *ssdname;
     struct ssdparams sp;
     struct ssd_channel *ch;
-    struct ppa *pg_maptbl; /* page or block level mapping table - FTL_MAPPING_TBL_MODE*/
-    struct pba *blk_maptbl; /* page or block level mapping table - FTL_MAPPING_TBL_MODE*/
+    struct ppa *pg_maptbl; /* page level mapping table - FTL_MAPPING_PAGE*/
+    struct pba *blk_maptbl; /* block level mapping table - FTL_MAPPING_BLOCK*/
+    pqueue_t *merge_q; /* merge queue linked list FTL_MAPPING_HYBRID*/
     uint64_t *rmap;     /* reverse mapptbl, assume it's stored in OOB */
 
     struct write_pointer wp;
